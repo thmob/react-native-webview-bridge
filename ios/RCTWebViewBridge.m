@@ -23,7 +23,6 @@
 
 #import "UIView+React.h"
 #import <objc/runtime.h>
-#import <WebKit/WebKit.h>
 
 //This is a very elegent way of defining multiline string in objective-c.
 //source: http://stackoverflow.com/a/23387659/828487
@@ -43,7 +42,7 @@ NSString *const RCTWebViewBridgeSchema = @"wvb";
 }
 @end
 
-@interface RCTWebViewBridge () <WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler, RCTAutoInsetsProtocol>
+@interface RCTWebViewBridge () <UIWebViewDelegate, RCTAutoInsetsProtocol>
 
 @property (nonatomic, copy) RCTDirectEventBlock onLoadingStart;
 @property (nonatomic, copy) RCTDirectEventBlock onLoadingFinish;
@@ -55,9 +54,8 @@ NSString *const RCTWebViewBridgeSchema = @"wvb";
 
 @implementation RCTWebViewBridge
 {
-  WKWebView *_webView;
+  UIWebView *_webView;
   NSString *_injectedJavaScript;
-  bool _shouldTrackLoadingStart;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame
@@ -66,8 +64,8 @@ NSString *const RCTWebViewBridgeSchema = @"wvb";
     super.backgroundColor = [UIColor clearColor];
     _automaticallyAdjustContentInsets = YES;
     _contentInset = UIEdgeInsetsZero;
-    _shouldTrackLoadingStart = NO;
-    [self setupWebview];
+    _webView = [[UIWebView alloc] initWithFrame:self.bounds];
+    _webView.delegate = self;
     [self addSubview:_webView];
   }
   return self;
@@ -103,16 +101,12 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
   );
 
   NSString *command = [NSString stringWithFormat: format, message];
-  [_webView evaluateJavaScript:command completionHandler:^(id result, NSError * _Nullable error) {
-      if (error) {
-          NSLog(@"WKWebview sendToBridge evaluateJavaScript Error: %@", error);
-      }
-  }];
+  [_webView stringByEvaluatingJavaScriptFromString:command];
 }
 
 - (NSURL *)URL
 {
-  return _webView.URL;
+  return _webView.request.URL;
 }
 
 - (void)setSource:(NSDictionary *)source
@@ -133,7 +127,7 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
     // passing the redirect urls back here, so we ignore them if trying to load
     // the same url. We'll expose a call to 'reload' to allow a user to load
     // the existing page.
-    if ([request.URL isEqual:_webView.URL]) {
+    if ([request.URL isEqual:_webView.request.URL]) {
       return;
     }
     if (!request.URL) {
@@ -174,9 +168,9 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
 - (NSMutableDictionary<NSString *, id> *)baseEvent
 {
   NSMutableDictionary<NSString *, id> *event = [[NSMutableDictionary alloc] initWithDictionary:@{
-    @"url": _webView.URL.absoluteString ?: @"",
+    @"url": _webView.request.URL.absoluteString ?: @"",
     @"loading" : @(_webView.loading),
-    @"title": _webView.title,
+    @"title": [_webView stringByEvaluatingJavaScriptFromString:@"document.title"],
     @"canGoBack": @(_webView.canGoBack),
     @"canGoForward" : @(_webView.canGoForward),
   }];
@@ -222,81 +216,58 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
   object_setClass(subview, newClass);
 }
 
-#pragma mark - WebKit WebView Setup and JS Handler
+#pragma mark - UIWebViewDelegate methods
 
--(void)setupWebview {
-    WKWebViewConfiguration *theConfiguration = [[WKWebViewConfiguration alloc] init];
-    WKUserContentController *controller = [[WKUserContentController alloc]init];
-    [controller addScriptMessageHandler:self name:@"observe"];
+- (BOOL)webView:(__unused UIWebView *)webView shouldStartLoadWithRequest:(NSURLRequest *)request
+ navigationType:(UIWebViewNavigationType)navigationType
+{
+  BOOL isJSNavigation = [request.URL.scheme isEqualToString:RCTJSNavigationScheme];
 
-    [theConfiguration setUserContentController:controller];
-    theConfiguration.allowsInlineMediaPlayback = NO;
+  if (!isJSNavigation && [request.URL.scheme isEqualToString:RCTWebViewBridgeSchema]) {
+    NSString* message = [webView stringByEvaluatingJavaScriptFromString:@"WebViewBridge.__fetch__()"];
 
-    _webView = [[WKWebView alloc] initWithFrame:self.bounds configuration:theConfiguration];
-    _webView.UIDelegate = self;
-    _webView.navigationDelegate = self;
-
-    [[NSHTTPCookieStorage sharedHTTPCookieStorage] setCookieAcceptPolicy:NSHTTPCookieAcceptPolicyAlways];
-}
-
--(void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message{
-  if ([message.body rangeOfString:RCTWebViewBridgeSchema].location == NSNotFound) {
     NSMutableDictionary<NSString *, id> *onBridgeMessageEvent = [[NSMutableDictionary alloc] initWithDictionary:@{
-      @"messages": [self stringArrayJsonToArray: message.body]
+      @"messages": [self stringArrayJsonToArray: message]
     }];
 
     _onBridgeMessage(onBridgeMessageEvent);
 
-    return;
+    isJSNavigation = YES;
   }
 
-  [_webView evaluateJavaScript:@"WebViewBridge.__fetch__()" completionHandler:^(id result, NSError * _Nullable error) {
-    if (!error) {
-      NSMutableDictionary<NSString *, id> *onBridgeMessageEvent = [[NSMutableDictionary alloc] initWithDictionary:@{
-        @"messages": [self stringArrayJsonToArray: result]
+  // skip this for the JS Navigation handler
+  if (!isJSNavigation && _onShouldStartLoadWithRequest) {
+    NSMutableDictionary<NSString *, id> *event = [self baseEvent];
+    [event addEntriesFromDictionary: @{
+      @"url": (request.URL).absoluteString,
+      @"navigationType": @(navigationType)
+    }];
+    if (![self.delegate webView:self
+      shouldStartLoadForRequest:event
+                   withCallback:_onShouldStartLoadWithRequest]) {
+      return NO;
+    }
+  }
+
+  if (_onLoadingStart) {
+    // We have this check to filter out iframe requests and whatnot
+    BOOL isTopFrame = [request.URL isEqual:request.mainDocumentURL];
+    if (isTopFrame) {
+      NSMutableDictionary<NSString *, id> *event = [self baseEvent];
+      [event addEntriesFromDictionary: @{
+        @"url": (request.URL).absoluteString,
+        @"navigationType": @(navigationType)
       }];
-
-      _onBridgeMessage(onBridgeMessageEvent);
+      _onLoadingStart(event);
     }
-  }];
+  }
+
+  // JS Navigation handler
+  return !isJSNavigation;
 }
 
-#pragma mark - WebKit WebView Delegate methods
-
-- (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation
+- (void)webView:(__unused UIWebView *)webView didFailLoadWithError:(NSError *)error
 {
-  _shouldTrackLoadingStart = YES;
-}
-
--(void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler{
-  if (_onLoadingStart && _shouldTrackLoadingStart) {
-    _shouldTrackLoadingStart = NO;
-    NSMutableDictionary<NSString *, id> *event = [self baseEvent];
-    [event addEntriesFromDictionary: @{
-      @"url": (navigationAction.request.URL).absoluteString,
-      @"navigationType": @(navigationAction.navigationType)
-    }];
-    _onLoadingStart(event);
-    NSLog(@"onLoadingStart event: %@", event);
-  }
-
-  if (_onShouldStartLoadWithRequest) {
-    NSMutableDictionary<NSString *, id> *event = [self baseEvent];
-    [event addEntriesFromDictionary: @{
-      @"url": (navigationAction.request.URL).absoluteString,
-      @"navigationType": @(navigationAction.navigationType)
-    }];
-
-    if (![self.delegate webView:self shouldStartLoadForRequest:event withCallback:_onShouldStartLoadWithRequest]) {
-      decisionHandler(WKNavigationActionPolicyCancel);
-    }else{
-      decisionHandler(WKNavigationActionPolicyAllow);
-    }
-  }
-  decisionHandler(WKNavigationActionPolicyAllow);
-}
-
--(void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error{
   if (_onLoadingError) {
     if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled) {
       // NSURLErrorCancelled is reported when a page has a redirect OR if you load
@@ -308,32 +279,34 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
 
     NSMutableDictionary<NSString *, id> *event = [self baseEvent];
     [event addEntriesFromDictionary:@{
-                                      @"domain": error.domain,
-                                      @"code": @(error.code),
-                                      @"description": error.localizedDescription,
-                                      }];
+      @"domain": error.domain,
+      @"code": @(error.code),
+      @"description": error.localizedDescription,
+    }];
     _onLoadingError(event);
   }
 }
 
--(void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation{
-  NSString *webViewBridgeScriptContent = [self webViewBridgeScript];
-  [webView evaluateJavaScript:webViewBridgeScriptContent completionHandler:^(id result, NSError * _Nullable error) {
-    _onLoadingFinish([self baseEvent]);
-  }];
-}
-
-- (WKWebView *)webView:(WKWebView *)webView createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration forNavigationAction:(WKNavigationAction *)navigationAction windowFeatures:(WKWindowFeatures *)windowFeatures
+- (void)webViewDidFinishLoad:(UIWebView *)webView
 {
+  //injecting WebViewBridge Script
+  NSString *webViewBridgeScriptContent = [self webViewBridgeScript];
+  [webView stringByEvaluatingJavaScriptFromString:webViewBridgeScriptContent];
+  //////////////////////////////////////////////////////////////////////////////
 
-  if (!navigationAction.targetFrame.isMainFrame) {
-    [webView loadRequest:navigationAction.request];
+  if (_injectedJavaScript != nil) {
+    NSString *jsEvaluationValue = [webView stringByEvaluatingJavaScriptFromString:_injectedJavaScript];
+
+    NSMutableDictionary<NSString *, id> *event = [self baseEvent];
+    event[@"jsEvaluationValue"] = jsEvaluationValue;
+
+    _onLoadingFinish(event);
   }
-
-  return nil;
+  // we only need the final 'finishLoad' call so only fire the event when we're actually done loading.
+  else if (_onLoadingFinish && !webView.loading && ![webView.request.URL.absoluteString isEqualToString:@"about:blank"]) {
+    _onLoadingFinish([self baseEvent]);
+  }
 }
-
-#pragma mark - WebviewBridge helpers
 
 - (NSArray*)stringArrayJsonToArray:(NSString *)message
 {
@@ -367,27 +340,6 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
       var doc = window.document;
       var customEvent = doc.createEvent('Event');
 
-      function wkWebViewBridgeAvailable() {
-        return (
-          window.webkit &&
-          window.webkit.messageHandlers &&
-          window.webkit.messageHandlers.observe &&
-          window.webkit.messageHandlers.observe.postMessage
-        )
-      }
-
-      function wkWebViewSend(event) {
-        if (!wkWebViewBridgeAvailable()) {
-          return
-        }
-        try {
-          window.webkit.messageHandlers.observe.postMessage(event)
-        } catch (e) {
-          console.error('wkWebViewSend error', e.message)
-          WebViewBridge.onError(e)
-        }
-      }
-
       function callFunc(func, message) {
         if ('function' === typeof func) {
           func(message);
@@ -395,11 +347,7 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
       }
 
       function signalNative() {
-        if (wkWebViewBridgeAvailable()) {
-          wkWebViewSend(WebViewBridge.__fetch__())
-        } else { // iOS UIWebview
-          window.location = RNWBSchema + '://message' + new Date().getTime();
-        }
+        window.location = RNWBSchema + '://message' + new Date().getTime();
       }
 
       //I made the private function ugly signiture so user doesn't called them accidently.
