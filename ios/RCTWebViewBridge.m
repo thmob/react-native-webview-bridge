@@ -340,6 +340,26 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
 
 - (WKWebView *)webView:(WKWebView *)webView createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration forNavigationAction:(WKNavigationAction *)navigationAction windowFeatures:(WKWindowFeatures *)windowFeatures
 {
+    if (navigationAction.targetFrame == nil) {
+        WKWebView *popup = [[WKWebView alloc] initWithFrame:_webView.frame configuration:configuration];
+        popup.UIDelegate = self;
+        popup.navigationDelegate = self;
+        [_webView addSubview:popup];
+        return popup;
+    } else if (!navigationAction.targetFrame.isMainFrame) {
+        [webView loadRequest:navigationAction.request];
+    }
+    
+    return nil;
+}
+
+- (void)webViewDidClose:(WKWebView *)webView
+{
+    [webView removeFromSuperview];
+}
+
+- (WKWebView *)webView:(WKWebView *)webView createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration forNavigationAction:(WKNavigationAction *)navigationAction windowFeatures:(WKWindowFeatures *)windowFeatures
+{
 
   if (!navigationAction.targetFrame.isMainFrame) {
     [webView loadRequest:navigationAction.request];
