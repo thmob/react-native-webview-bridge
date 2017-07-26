@@ -182,6 +182,8 @@ var WebViewBridge = React.createClass({
     delete props.onBridgeMessage;
     delete props.onShouldStartLoadWithRequest;
     delete props.scalesPageToFit;
+    delete props.allowMixedContent;
+    delete props.allowWebContentsDebugging;
 
     var webView =
       <RCTWebViewBridge
