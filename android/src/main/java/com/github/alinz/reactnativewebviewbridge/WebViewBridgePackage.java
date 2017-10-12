@@ -16,14 +16,13 @@ public class WebViewBridgePackage implements ReactPackage {
         return new ArrayList<>();
     }
 
-    
+    @Override
     public List<ViewManager> createViewManagers(ReactApplicationContext reactApplicationContext) {
         return Arrays.<ViewManager>asList(
                 new WebViewBridgeManager()
         );
     }
 
-    @Override
     public List<Class<? extends JavaScriptModule>> createJSModules() {
         return Arrays.asList();
     }
